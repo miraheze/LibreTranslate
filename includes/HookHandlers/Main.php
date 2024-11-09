@@ -16,7 +16,7 @@ use MediaWiki\Title\TitleFactory;
 use MessageLocalizer;
 use Miraheze\MachineTranslation\ConfigNames;
 use Miraheze\MachineTranslation\Jobs\MachineTranslationJob;
-use Miraheze\MachineTranslation\LanguageUtils;
+use Miraheze\MachineTranslation\Services\MachineTranslationLanguages;
 use Miraheze\MachineTranslation\Services\MachineTranslationUtils;
 use TextContent;
 
@@ -25,6 +25,7 @@ class Main {
 	private Config $config;
 	private JobQueueGroupFactory $jobQueueGroupFactory;
 	private LanguageNameUtils $languageNameUtils;
+	private MachineTranslationLanguages $machineTranslationLanguages;
 	private MachineTranslationUtils $machineTranslationUtils;
 	private MessageLocalizer $messageLocalizer;
 	private TitleFactory $titleFactory;
@@ -34,12 +35,14 @@ class Main {
 		ConfigFactory $configFactory,
 		JobQueueGroupFactory $jobQueueGroupFactory,
 		LanguageNameUtils $languageNameUtils,
+		MachineTranslationLanguages $machineTranslationLanguages,
 		MachineTranslationUtils $machineTranslationUtils,
 		TitleFactory $titleFactory,
 		WikiPageFactory $wikiPageFactory
 	) {
 		$this->jobQueueGroupFactory = $jobQueueGroupFactory;
 		$this->languageNameUtils = $languageNameUtils;
+		$this->machineTranslationLanguages = $machineTranslationLanguages;
 		$this->machineTranslationUtils = $machineTranslationUtils;
 		$this->titleFactory = $titleFactory;
 		$this->wikiPageFactory = $wikiPageFactory;
@@ -80,12 +83,7 @@ class Main {
 		}
 
 		// Language code check
-		if ( !LanguageUtils::isValidLanguageCode( $subpage ) ) {
-			return;
-		}
-
-		// Accept language?
-		if ( !LanguageUtils::isLanguageSupported( strtoupper( $subpage ) ) ) {
+		if ( !$this->languageNameUtils->isValidCode( $subpage ) ) {
 			return;
 		}
 
@@ -94,13 +92,27 @@ class Main {
 			return;
 		}
 
+		$page = $this->wikiPageFactory->newFromTitle( $baseTitle );
+		if ( !$page->exists() ) {
+			return;
+		}
+
+		// Accept language?
+		if ( !$this->machineTranslationLanguages->isLanguageSupported( strtoupper( $subpage ) ) ) {
+			return;
+		}
+
 		$cacheKey = $baseTitle->getArticleID() . '-' . $baseTitle->getLatestRevID() . '-' . strtoupper( $subpage );
 
 		// Get title text for replace (the base page title + language caption)
 		$languageCaption = ucfirst(
 			$this->languageNameUtils->getLanguageName( $subpage ) ?:
-			LanguageUtils::getLanguageCaption( strtoupper( $subpage ) )
+			$this->machineTranslationLanguages->getLanguageCaption( strtoupper( $subpage ) )
 		);
+
+		$baseCode = $baseTitle->getPageLanguage()->getCode();
+		$source = array_flip( $this->machineTranslationLanguages->getLanguageCodeMap() )[$baseCode] ?? $baseCode;
+		$target = array_flip( $this->machineTranslationLanguages->getLanguageCodeMap() )[$subpage] ?? $subpage;
 
 		$languageTitle = '';
 		if ( !$this->config->get( ConfigNames::SuppressLanguageCaption ) ) {
@@ -111,7 +123,7 @@ class Main {
 				if ( !$titleText && !$this->config->get( ConfigNames::UseJobQueue ) ) {
 					$titleText = $this->machineTranslationUtils->callTranslation(
 						$baseTitle->getTitleValue()->getText(),
-						$subpage
+						$source, $target
 					);
 
 					$this->machineTranslationUtils->storeCache( $titleCacheKey, $titleText );
@@ -125,11 +137,6 @@ class Main {
 					],
 					' (' . $languageCaption . ')'
 				);
-		}
-
-		$page = $this->wikiPageFactory->newFromTitle( $baseTitle );
-		if ( !$page->exists() ) {
-			return;
 		}
 
 		$out = $article->getContext()->getOutput();
@@ -166,7 +173,8 @@ class Main {
 							[
 								'cachekey' => $cacheKey,
 								'content' => $out->parseAsContent( $text ),
-								'subpage' => $subpage,
+								'source' => $source,
+								'target' => $target,
 								'titletext' => $baseTitle->getTitleValue()->getText(),
 							]
 						)
@@ -185,7 +193,7 @@ class Main {
 			} else {
 				$text = $this->machineTranslationUtils->callTranslation(
 					$out->parseAsContent( $text ),
-					$subpage
+					$source, $target
 				);
 
 				if ( !$text ) {
